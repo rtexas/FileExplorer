@@ -1,0 +1,19 @@
+# Build output
+bin/
+obj/
+
+# User-specific files
+*.user
+*.suo
+.vs/
+
+# Node modules (for make_doc.js tooling)
+node_modules/
+
+# NuGet packages
+*.nupkg
+packages/
+
+# OS files
+.DS_Store
+Thumbs.db
