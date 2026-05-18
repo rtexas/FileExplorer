@@ -11,6 +11,14 @@ partial class MainForm
     private ListView listView = null!;
     private ToolStrip toolStrip = null!;
     private ToolStripButton btnRefresh = null!;
+    private ToolStripLabel filterLabel = null!;
+    private ToolStripTextBox filterTextBox = null!;
+    private Panel navBar = null!;
+    private Button btnBack = null!;
+    private Button btnForward = null!;
+    private Button btnUp = null!;
+    private TextBox addressBox = null!;
+    private ContextMenuStrip listViewMenu = null!;
     private StatusStrip statusStrip = null!;
     private ToolStripStatusLabel statusLabel = null!;
     private ToolStripStatusLabel scanStatusLabel = null!;
@@ -34,9 +42,10 @@ partial class MainForm
             ColorDepth = ColorDepth.Depth32Bit,
             ImageSize  = new Size(16, 16)
         };
-        imageList.Images.Add(Icons.Drive());   // 0 = drive
-        imageList.Images.Add(Icons.Folder());  // 1 = folder
-        imageList.Images.Add(Icons.File());    // 2 = file
+        imageList.Images.Add(Icons.Drive());   // 0 = drive (fallback)
+        imageList.Images.Add(Icons.Folder());  // 1 = folder (fallback)
+        imageList.Images.Add(Icons.File());    // 2 = file (fallback)
+        // Indices 3+ are shell icons populated at runtime by GetShellIconIndex()
 
         // ── Tool strip ───────────────────────────────────────────────────────
         toolStrip  = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, Dock = DockStyle.Top };
@@ -47,6 +56,77 @@ partial class MainForm
         };
         btnRefresh.Click += Btn_Refresh_Click;
         toolStrip.Items.Add(btnRefresh);
+        toolStrip.Items.Add(new ToolStripSeparator());
+        filterLabel = new ToolStripLabel("Filter:")
+        {
+            Margin = new Padding(6, 0, 2, 0)
+        };
+        filterTextBox = new ToolStripTextBox
+        {
+            Size        = new Size(220, 22),
+            ToolTipText = "Filter by name pattern(s), e.g. *.log  or  *.log;*.txt"
+        };
+        filterTextBox.TextChanged += FilterText_Changed;
+        toolStrip.Items.Add(filterLabel);
+        toolStrip.Items.Add(filterTextBox);
+
+        // ── Navigation bar (Back / Forward / Up / address box) ────────────────
+        navBar = new Panel
+        {
+            Dock    = DockStyle.Top,
+            Height  = 28,
+            Padding = new Padding(2, 2, 2, 2)
+        };
+
+        btnBack = new Button
+        {
+            Text      = "←",
+            Width     = 28,
+            Dock      = DockStyle.Left,
+            FlatStyle = FlatStyle.Flat,
+            Font      = new Font("Segoe UI", 8f),
+            TabStop   = false
+        };
+        btnBack.FlatAppearance.BorderSize = 0;
+        btnBack.Click += BtnBack_Click;
+
+        btnForward = new Button
+        {
+            Text      = "→",
+            Width     = 28,
+            Dock      = DockStyle.Left,
+            FlatStyle = FlatStyle.Flat,
+            Font      = new Font("Segoe UI", 8f),
+            TabStop   = false
+        };
+        btnForward.FlatAppearance.BorderSize = 0;
+        btnForward.Click += BtnForward_Click;
+
+        btnUp = new Button
+        {
+            Text      = "↑",
+            Width     = 28,
+            Dock      = DockStyle.Left,
+            FlatStyle = FlatStyle.Flat,
+            Font      = new Font("Segoe UI", 9f),
+            TabStop   = false
+        };
+        btnUp.FlatAppearance.BorderSize = 0;
+        btnUp.Click += BtnUp_Click;
+
+        addressBox = new TextBox
+        {
+            Dock      = DockStyle.Fill,
+            Font      = new Font("Segoe UI", 9f),
+            BorderStyle = BorderStyle.FixedSingle
+        };
+        addressBox.KeyDown += AddressBox_KeyDown;
+
+        // Add right-to-left so Fill textbox claims remaining space after left-docked buttons
+        navBar.Controls.Add(addressBox);
+        navBar.Controls.Add(btnUp);
+        navBar.Controls.Add(btnForward);
+        navBar.Controls.Add(btnBack);
 
         // ── Tree view ────────────────────────────────────────────────────────
         treeView = new TreeView
@@ -61,6 +141,7 @@ partial class MainForm
         };
         treeView.BeforeExpand += TreeView_BeforeExpand;
         treeView.AfterSelect  += TreeView_AfterSelect;
+        treeView.AfterExpand  += TreeView_AfterExpand;
 
         // ── List view ────────────────────────────────────────────────────────
         listView = new ListView
@@ -71,6 +152,7 @@ partial class MainForm
             GridLines          = true,
             SmallImageList     = imageList,
             AllowColumnReorder = true,
+            LabelEdit          = true,
             Sorting            = SortOrder.None,
             Font               = new Font("Segoe UI", 9f)
         };
@@ -78,8 +160,26 @@ partial class MainForm
         listView.Columns.Add("Date Modified", 155);
         listView.Columns.Add("Size",          110);
         listView.Columns.Add("Type",          140);
-        listView.ColumnClick += ListView_ColumnClick;
-        listView.DoubleClick += ListView_DoubleClick;
+        listView.ColumnClick       += ListView_ColumnClick;
+        listView.DoubleClick       += ListView_DoubleClick;
+        listView.KeyDown           += ListView_KeyDown;
+        listView.AfterLabelEdit    += ListView_AfterLabelEdit;
+        listView.OwnerDraw          = true;
+        listView.DrawColumnHeader  += ListView_DrawColumnHeader;
+        listView.DrawItem          += ListView_DrawItem;
+        listView.DrawSubItem       += ListView_DrawSubItem;
+
+        // ── Context menu ─────────────────────────────────────────────────────
+        listViewMenu = new ContextMenuStrip(components);
+        listViewMenu.Items.Add("Open",                         null, ContextMenu_Open);
+        listViewMenu.Items.Add("Open in Windows Explorer",     null, ContextMenu_OpenExplorer);
+        listViewMenu.Items.Add("Open with Default App",        null, ContextMenu_OpenDefault);
+        listViewMenu.Items.Add("Copy Path",                    null, ContextMenu_CopyPath);
+        listViewMenu.Items.Add(new ToolStripSeparator());
+        listViewMenu.Items.Add("Rename\tF2",                   null, ContextMenu_Rename);
+        listViewMenu.Items.Add("Delete\tDel",                  null, ContextMenu_Delete);
+        listViewMenu.Opening += ListViewMenu_Opening;
+        listView.ContextMenuStrip = listViewMenu;
 
         // ── Split container ─────────────────────────────────────────────────
         splitContainer = new SplitContainer
@@ -123,10 +223,13 @@ partial class MainForm
         statusStrip.Items.Add(statusSizeLabel);
 
         // ── Form ─────────────────────────────────────────────────────────────
+        // Add order matters for DockStyle stacking (higher index = laid out first).
+        // Desired visual order top→bottom: toolStrip, navBar, splitContainer, statusStrip.
         SuspendLayout();
-        Controls.Add(splitContainer);
-        Controls.Add(toolStrip);
-        Controls.Add(statusStrip);
+        Controls.Add(splitContainer);   // index 0 – Fill, laid out last
+        Controls.Add(navBar);           // index 1 – Top, laid out third  → below toolStrip
+        Controls.Add(toolStrip);        // index 2 – Top, laid out second → very top
+        Controls.Add(statusStrip);      // index 3 – Bottom, laid out first → very bottom
         ClientSize  = new Size(1200, 800);
         MinimumSize = new Size(700, 450);
         Text        = "File Explorer";
