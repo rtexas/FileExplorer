@@ -176,8 +176,12 @@ partial class MainForm
         listViewMenu.Items.Add("Open with Default App",        null, ContextMenu_OpenDefault);
         listViewMenu.Items.Add("Copy Path",                    null, ContextMenu_CopyPath);
         listViewMenu.Items.Add(new ToolStripSeparator());
-        listViewMenu.Items.Add("Rename\tF2",                   null, ContextMenu_Rename);
-        listViewMenu.Items.Add("Delete\tDel",                  null, ContextMenu_Delete);
+        var menuRename = new ToolStripMenuItem("Rename") { ShortcutKeyDisplayString = "F2" };
+        menuRename.Click += ContextMenu_Rename;
+        listViewMenu.Items.Add(menuRename);
+        var menuDelete = new ToolStripMenuItem("Delete") { ShortcutKeyDisplayString = "Del" };
+        menuDelete.Click += ContextMenu_Delete;
+        listViewMenu.Items.Add(menuDelete);
         listViewMenu.Opening += ListViewMenu_Opening;
         listView.ContextMenuStrip = listViewMenu;
 
