@@ -1213,20 +1213,16 @@ public partial class MainForm : Form
     protected override void OnLoad(EventArgs e)
     {
         base.OnLoad(e);
-        splitContainer.Panel1MinSize    = 150;
-        splitContainer.Panel2MinSize    = 300;
-
         // Restore persisted settings
         var saved = LoadSettings();
-        splitContainer.SplitterDistance = saved?.SplitterDistance ?? 300;
+
+        if (saved?.ColumnWidths is { Length: 4 } cw)
+            for (int i = 0; i < 4; i++) listView.Columns[i].Width = cw[i];
 
         int dateWidth = TextRenderer.MeasureText("2000-00-00  00:00:00", listView.Font).Width + 16;
         if (listView.Columns[1].Width < dateWidth) listView.Columns[1].Width = dateWidth;
         int sizeWidth = TextRenderer.MeasureText("Not Accessible", listView.Font).Width + 16;
         if (listView.Columns[2].Width < sizeWidth) listView.Columns[2].Width = sizeWidth;
-
-        if (saved?.ColumnWidths is { Length: 4 } cw)
-            for (int i = 0; i < 4; i++) listView.Columns[i].Width = cw[i];
 
         if (saved != null)
         {
@@ -1236,10 +1232,23 @@ public partial class MainForm : Form
 
         _baseColWidths = listView.Columns.Cast<ColumnHeader>().Select(c => c.Width).ToArray();
 
+        // Defer min-size + splitter assignment until after the first layout
+        // pass so splitContainer.Width reflects its true painted size rather
+        // than the designer placeholder (150 px). Setting Panel2MinSize while
+        // Width is still 150 produces an empty valid range and WinForms throws.
+        int savedDist = saved?.SplitterDistance ?? 300;
+        BeginInvoke(() =>
+        {
+            splitContainer.Panel1MinSize = 150;
+            splitContainer.Panel2MinSize = 300;
+            int max = Math.Max(150, splitContainer.Width - 300 - splitContainer.SplitterWidth);
+            splitContainer.SplitterDistance = Math.Clamp(savedDist, 150, max);
+        });
+
         int formChrome = Width - ClientSize.Width;
         int lvBorder   = listView.Width - listView.ClientSize.Width;
         MinimumSize = new Size(
-            formChrome + splitContainer.Panel1MinSize + splitContainer.SplitterWidth
+            formChrome + 150 + splitContainer.SplitterWidth
             + _baseColWidths.Sum() + SystemInformation.VerticalScrollBarWidth + lvBorder,
             MinimumSize.Height);
 
