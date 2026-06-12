@@ -13,6 +13,7 @@ partial class MainForm
     private ToolStripButton btnRefresh = null!;
     private ToolStripLabel filterLabel = null!;
     private ToolStripTextBox filterTextBox = null!;
+    private ToolStripButton btnApplyFilter = null!;
     private Panel navBar = null!;
     private Button btnBack = null!;
     private Button btnForward = null!;
@@ -40,6 +41,7 @@ partial class MainForm
         btnRefresh = new ToolStripButton();
         filterLabel = new ToolStripLabel();
         filterTextBox = new ToolStripTextBox();
+        btnApplyFilter = new ToolStripButton();
         navBar = new Panel();
         addressBox = new TextBox();
         btnUp = new Button();
@@ -79,7 +81,7 @@ partial class MainForm
         // 
         // toolStrip
         // 
-        toolStrip.Items.AddRange(new ToolStripItem[] { btnRefresh, filterLabel, filterTextBox });
+        toolStrip.Items.AddRange(new ToolStripItem[] { btnRefresh, filterLabel, filterTextBox, btnApplyFilter });
         toolStrip.Location = new Point(0, 0);
         toolStrip.Name = "toolStrip";
         toolStrip.Size = new Size(1200, 25);
@@ -105,7 +107,13 @@ partial class MainForm
         filterTextBox.Name = "filterTextBox";
         filterTextBox.Size = new Size(100, 25);
         filterTextBox.TextChanged += FilterText_Changed;
-        // 
+        //
+        // btnApplyFilter
+        //
+        btnApplyFilter.Name = "btnApplyFilter";
+        btnApplyFilter.Text = "⏎  Apply  [F8]";
+        btnApplyFilter.Click += BtnApplyFilter_Click;
+        //
         // navBar
         // 
         navBar.Controls.Add(addressBox);
@@ -170,9 +178,13 @@ partial class MainForm
         treeView.Name = "treeView";
         treeView.Size = new Size(121, 97);
         treeView.TabIndex = 0;
+        treeView.DrawMode = TreeViewDrawMode.OwnerDrawText;
         treeView.BeforeExpand += TreeView_BeforeExpand;
         treeView.AfterExpand += TreeView_AfterExpand;
         treeView.AfterSelect += TreeView_AfterSelect;
+        treeView.DrawNode += TreeView_DrawNode;
+        treeView.NodeMouseClick += TreeView_NodeMouseClick;
+        treeView.MouseDown += TreeView_MouseDown;
         // 
         // listView
         //

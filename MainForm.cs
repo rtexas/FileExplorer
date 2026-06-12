@@ -10,12 +10,13 @@ public partial class MainForm : Form
 {
     // ── State ────────────────────────────────────────────────────────────────
     private readonly Dictionary<string, long> _folderSizes         = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, long> _filteredFolderSizes = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, long> _filteredFolderSizes  = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, long> _lastDisplayedSize    = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _sizeLock = new();
     private CancellationTokenSource _cts       = new();
     private CancellationTokenSource _filterCts = new();
-    private System.Windows.Forms.Timer? _filterDebounce;
     private System.Windows.Forms.Timer? _watcherDebounce;
+    private readonly ToolTip _nodeToolTip = new() { AutoPopDelay = 6000, InitialDelay = 0, ReshowDelay = 0 };
     private string _filterText = "";
     private string? _currentPath;
     private int     _sortCol = 0;
@@ -59,7 +60,7 @@ public partial class MainForm : Form
     private void LoadDrives()
     {
         CancelAndResetCts();
-        lock (_sizeLock) { _folderSizes.Clear(); _filteredFolderSizes.Clear(); }
+        lock (_sizeLock) { _folderSizes.Clear(); _filteredFolderSizes.Clear(); _lastDisplayedSize.Clear(); }
         _driveProgress.Clear();
 
         progressBar.Value    = 0;
@@ -191,16 +192,211 @@ public partial class MainForm : Form
             NavigateTo(path, fromTree: true);
     }
 
+    private void TreeView_MouseDown(object? sender, MouseEventArgs e)
+    {
+        var hit = treeView.HitTest(e.X, e.Y);
+        // Skip glyph (expand/collapse triangle) — let the TreeView handle that itself.
+        if (hit.Location == TreeViewHitTestLocations.PlusMinus) return;
+
+        // GetNodeAt / HitTest only cover the text-width area in OwnerDrawText mode.
+        // Fall back to a Y-scan so clicking anywhere on the row selects the node.
+        TreeNode? node = hit.Node ?? FindNodeAtY(treeView.Nodes, e.Y);
+        if (node?.Tag != null)
+            treeView.SelectedNode = node;
+    }
+
+    private static TreeNode? FindNodeAtY(TreeNodeCollection nodes, int y)
+    {
+        foreach (TreeNode n in nodes)
+        {
+            if (!n.Bounds.IsEmpty && n.Bounds.Top <= y && y < n.Bounds.Bottom) return n;
+            if (n.IsExpanded)
+            {
+                var found = FindNodeAtY(n.Nodes, y);
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
+    private void TreeView_NodeMouseClick(object? sender, TreeNodeMouseClickEventArgs e)
+    {
+        // Skip tooltip when clicking the expand/collapse glyph — the node isn't being "selected".
+        var hit = treeView.HitTest(e.X, e.Y);
+        if (hit.Location == TreeViewHitTestLocations.PlusMinus) return;
+
+        if (e.Node?.Tag is string path)
+        {
+            // Ensure navigation fires even when re-clicking an already-selected node.
+            if (!SamePath(path, _currentPath))
+                NavigateTo(path, fromTree: true);
+            ShowNodeTooltip(e.Node, path);
+        }
+    }
+
+    private void ShowNodeTooltip(TreeNode node, string path)
+    {
+        string name = Path.GetFileName(path);
+        if (string.IsNullOrEmpty(name)) name = path.TrimEnd(Path.DirectorySeparatorChar);
+
+        string suffix;
+        if (!string.IsNullOrEmpty(_filterText))
+        {
+            bool isScanned, hasFiltered;
+            long total = 0, filtered = 0;
+            lock (_sizeLock)
+            {
+                isScanned   = _folderSizes.TryGetValue(path, out total);
+                hasFiltered = _filteredFolderSizes.TryGetValue(path, out filtered);
+            }
+
+            bool noAccess = node.ForeColor == SystemColors.GrayText;
+            if (noAccess)
+                suffix = "  No Access";
+            else if (!isScanned || !hasFiltered)
+                suffix = "  Calculating…";
+            else if (total > 0)
+                suffix = $"  {FormatSize(filtered)} / {FormatSize(total)}";
+            else
+                suffix = "";
+        }
+        else
+        {
+            // No filter — show folder size if known.
+            long size = 0;
+            lock (_sizeLock) _folderSizes.TryGetValue(path, out size);
+            suffix = size > 0 ? $"  {FormatSize(size)}" : "";
+        }
+
+        string tip = name + suffix;
+        var bounds = node.Bounds;
+        _nodeToolTip.Show(tip, treeView, bounds.Left, bounds.Bottom, 5000);
+    }
+
+    private void TreeView_DrawNode(object? sender, DrawTreeNodeEventArgs e)
+    {
+        // Suppress the default text draw — we own the entire text region.
+        // Without this, WinForms renders its own text on top of ours, causing bold/doubled appearance.
+        e.DrawDefault = false;
+
+        bool selected = (e.State & TreeNodeStates.Selected) != 0;
+        Color textColor = selected ? SystemColors.HighlightText : e.Node!.ForeColor;
+        if (textColor == Color.Empty) textColor = treeView.ForeColor;
+
+        // Determine the extra indicator to draw right of the folder name.
+        string? extraText  = null;
+        Color   extraColor = Color.Gray;
+        bool    showBar    = false;
+        int     pct = 0;
+        long    total = 0, filtered = 0;
+
+        if (e.Node.Tag is string path)
+        {
+            bool isDrive  = _driveProgress.ContainsKey(path);
+            bool noAccess = e.Node.ForeColor == SystemColors.GrayText;
+
+            if (!isDrive)
+            {
+                bool isScanned, hasFiltered;
+                lock (_sizeLock)
+                {
+                    isScanned   = _folderSizes.TryGetValue(path, out total);
+                    hasFiltered = _filteredFolderSizes.TryGetValue(path, out filtered);
+                }
+
+                if (noAccess)
+                {
+                    extraText  = "No Access";
+                    extraColor = Color.FromArgb(180, 0, 0);
+                }
+                else if (!isScanned)
+                {
+                    extraText = "Calculating…";
+                }
+                else if (total == 0)
+                {
+                    // Empty folder — no indicator.
+                }
+                else if (!string.IsNullOrEmpty(_filterText))
+                {
+                    // Filter active: show bar+size or "Calculating…" until filter result is ready.
+                    if (!hasFiltered)
+                        extraText = "Calculating…";
+                    else
+                    {
+                        showBar = true;
+                        pct = (int)Math.Min(100, filtered * 100L / total);
+                    }
+                }
+                else
+                {
+                    // No filter: show plain folder size.
+                    extraText = $"  {FormatSize(total)}";
+                }
+            }
+        }
+
+        int textWidth = TextRenderer.MeasureText(e.Node.Text, treeView.Font).Width;
+        int itemLeft  = e.Bounds.Left + textWidth + 6;
+        const int barWidth = 50, sizeWidth = 120, extraLabelWidth = 120;
+        const int maxExtraW = barWidth + 4 + sizeWidth; // widest possible extra area
+
+        int extraW = showBar ? maxExtraW : (extraText != null ? extraLabelWidth : 0);
+        // Use maxExtraW for clearing so a narrower repaint never leaves ghost bar pixels
+        var clearRect = new Rectangle(e.Bounds.Left, e.Bounds.Top,
+            e.Bounds.Width + maxExtraW + 4, e.Bounds.Height);
+        using (var bgBrush = new SolidBrush(selected ? SystemColors.Highlight : treeView.BackColor))
+            e.Graphics.FillRectangle(bgBrush, clearRect);
+
+        // Draw folder name.
+        TextRenderer.DrawText(e.Graphics, e.Node.Text, treeView.Font,
+            e.Bounds, textColor,
+            TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+
+        // Draw extra content.
+        if (extraText != null)
+        {
+            Color c = selected ? SystemColors.HighlightText : extraColor;
+            TextRenderer.DrawText(e.Graphics, extraText, treeView.Font,
+                new Rectangle(itemLeft, e.Bounds.Top, extraLabelWidth, e.Bounds.Height),
+                c, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+        }
+        else if (showBar)
+        {
+            int barHeight = 8;
+            int barTop    = e.Bounds.Top + (e.Bounds.Height - barHeight) / 2;
+            var barBack   = new Rectangle(itemLeft, barTop, barWidth, barHeight);
+            var barFill   = new Rectangle(itemLeft, barTop, barWidth * pct / 100, barHeight);
+
+            e.Graphics.FillRectangle(Brushes.LightGray, barBack);
+            using var fillBrush = new SolidBrush(Color.FromArgb(70, 130, 180));
+            e.Graphics.FillRectangle(fillBrush, barFill);
+            e.Graphics.DrawRectangle(Pens.DarkGray, barBack);
+
+            string sizeLabel = $" {FormatSize(filtered)} / {FormatSize(total)}";
+            TextRenderer.DrawText(e.Graphics, sizeLabel, treeView.Font,
+                new Rectangle(itemLeft + barWidth + 4, e.Bounds.Top, sizeWidth, e.Bounds.Height),
+                textColor, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+        }
+    }
+
     private void TreeView_AfterExpand(object? sender, TreeViewEventArgs e)
     {
         if (string.IsNullOrEmpty(_filterText) || e.Node == null) return;
-        var childPaths = new List<string>();
+        var paths = new List<string>();
+
+        // Include the expanded node itself so the aggregation step rolls children's filtered
+        // sizes back up into it, giving the parent an entry in _filteredFolderSizes.
+        if (e.Node.Tag is string parentPath && !_driveProgress.ContainsKey(parentPath))
+            paths.Add(parentPath);
+
         foreach (TreeNode child in e.Node.Nodes)
-            if (child.Tag is string cp) childPaths.Add(cp);
-        if (childPaths.Count > 0)
+            if (child.Tag is string cp) paths.Add(cp);
+
+        if (paths.Count > 0)
         {
             var tok = _filterCts.Token; var pattern = _filterText;
-            Task.Run(() => ComputeFilteredSizesAsync(childPaths, pattern, tok), tok);
+            Task.Run(() => ComputeFilteredSizesAsync(paths, pattern, tok), tok);
         }
     }
 
@@ -387,7 +583,23 @@ public partial class MainForm : Form
             int folders = listView.Items.Cast<ListViewItem>().Count(i => i.SubItems[3].Text == "Folder");
             int files   = listView.Items.Count - folders;
             statusLabel.Text = path;
-            string filterSuffix  = string.IsNullOrEmpty(_filterText) ? "" : $"  [filter: {_filterText}]";
+
+            string filterSuffix = "";
+            if (!string.IsNullOrEmpty(_filterText))
+            {
+                long total    = 0;
+                long filtered = 0;
+                lock (_sizeLock)
+                {
+                    _folderSizes.TryGetValue(path, out total);
+                    _filteredFolderSizes.TryGetValue(path, out filtered);
+                }
+                string pctStr = (total > 0)
+                    ? $"  ({filtered * 100L / total}% of folder filtered)"
+                    : "  (filtered)";
+                filterSuffix = $"  [filter: {_filterText}]{pctStr}";
+            }
+
             statusSizeLabel.Text =
                 $"{folders} folder{(folders == 1 ? "" : "s")},  {files} file{(files == 1 ? "" : "s")}{filterSuffix}";
         }
@@ -467,6 +679,7 @@ public partial class MainForm : Form
     private void Form_KeyDown(object? sender, KeyEventArgs e)
     {
         if (e.KeyCode == Keys.F5) { DoRefresh(); e.Handled = true; }
+        if (e.KeyCode == Keys.F8) { ApplyFilterNow(); e.Handled = true; }
     }
 
     private void ListView_AfterLabelEdit(object? sender, LabelEditEventArgs e)
@@ -711,6 +924,25 @@ public partial class MainForm : Form
         }
     }
 
+    // Invalidates just the row rectangle for one node (including the extra-content area to the right).
+    // Use this instead of treeView.Invalidate() to avoid repainting — and flashing — the whole tree.
+    private void InvalidateNodeRow(TreeNode n)
+    {
+        if (n.Bounds.IsEmpty) return;
+        treeView.Invalidate(new Rectangle(0, n.Bounds.Top, treeView.ClientSize.Width, n.Bounds.Height));
+    }
+
+    // Walks the visible tree and invalidates only the rows whose paths are in the given set.
+    private void InvalidateNodesForPaths(TreeNodeCollection nodes, HashSet<string> paths)
+    {
+        foreach (TreeNode n in nodes)
+        {
+            if (n.Tag is string path && paths.Contains(path))
+                InvalidateNodeRow(n);
+            if (n.IsExpanded) InvalidateNodesForPaths(n.Nodes, paths);
+        }
+    }
+
     // Refreshes every tree node that is currently visible (its parent is expanded).
     // Called after a drive scan completes so all children get their final sizes.
     private void RefreshExpandedTreeNodes(TreeNodeCollection nodes)
@@ -719,15 +951,23 @@ public partial class MainForm : Form
         {
             if (n.Tag is string path && !_driveProgress.ContainsKey(path))
             {
-                bool scanned;
-                long size;
+                bool scanned; long size;
                 lock (_sizeLock) scanned = _folderSizes.TryGetValue(path, out size);
-                if (scanned)   // size may be 0 (empty/inaccessible) — still show it
+                if (scanned)
                 {
                     var name = Path.GetFileName(path);
                     if (string.IsNullOrEmpty(name)) name = path;
                     var label = FormatDirLabel(name, size, GetFilteredSize(path));
                     if (n.Text != label) n.Text = label;
+
+                    // Only repaint rows whose size actually changed since last paint
+                    bool changed;
+                    lock (_sizeLock)
+                    {
+                        changed = !_lastDisplayedSize.TryGetValue(path, out long prev) || prev != size;
+                        if (changed) _lastDisplayedSize[path] = size;
+                    }
+                    if (changed) InvalidateNodeRow(n);
                 }
             }
             if (n.IsExpanded)
@@ -856,14 +1096,10 @@ public partial class MainForm : Form
 
     private void FilterText_Changed(object? sender, EventArgs e)
     {
-        if (_filterDebounce == null)
-        {
-            _filterDebounce = new System.Windows.Forms.Timer { Interval = 350 };
-            _filterDebounce.Tick += (_, _) => { _filterDebounce!.Stop(); ApplyFilterNow(); };
-        }
-        _filterDebounce.Stop();
-        _filterDebounce.Start();
+        // Filter is applied only on button click or F8.
     }
+
+    private void BtnApplyFilter_Click(object? sender, EventArgs e) => ApplyFilterNow();
 
     private void ApplyFilterNow()
     {
@@ -879,10 +1115,13 @@ public partial class MainForm : Form
             CollectTreePaths(treeView.Nodes, visiblePaths);
             var tok = _filterCts.Token; var pattern = _filterText;
             Task.Run(() => ComputeFilteredSizesAsync(visiblePaths, pattern, tok), tok);
+            treeView.Invalidate();
         }
         else
         {
+            treeView.BeginUpdate();
             RestoreTreeNodeLabels(treeView.Nodes);
+            treeView.EndUpdate();
         }
     }
 
@@ -907,8 +1146,10 @@ public partial class MainForm : Form
             if (parent != null && aggregated.ContainsKey(parent))
                 aggregated[parent] += aggregated[path];
         }
+        var computedPaths = aggregated.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
         lock (_sizeLock) { foreach (var kvp in aggregated) _filteredFolderSizes[kvp.Key] = kvp.Value; }
-        if (!ct.IsCancellationRequested) SafeInvoke(() => UpdateTreeNodesWithFilter(treeView.Nodes));
+        if (!ct.IsCancellationRequested) SafeInvoke(() =>
+            InvalidateNodesForPaths(treeView.Nodes, computedPaths));
     }
 
     private static long CalcFilteredDirect(string path, string pattern, CancellationToken ct)
@@ -957,8 +1198,7 @@ public partial class MainForm : Form
         {
             if (n.Tag is string path && !_driveProgress.ContainsKey(path))
             {
-                bool scanned;
-                long size;
+                bool scanned; long size;
                 lock (_sizeLock) scanned = _folderSizes.TryGetValue(path, out size);
                 if (scanned)
                 {
@@ -1129,7 +1369,8 @@ public partial class MainForm : Form
                 listView.Columns.Cast<ColumnHeader>().Select(c => c.Width).ToArray(),
                 _sortCol, _sortDir.ToString(),
                 _currentPath,
-                splitContainer.SplitterDistance);
+                splitContainer.SplitterDistance,
+                _filterText);
             File.WriteAllText(SettingsPath, JsonSerializer.Serialize(s));
         }
         catch { }
@@ -1182,8 +1423,7 @@ public partial class MainForm : Form
     private static string FormatDirLabel(string name, long size, long filteredSize = -1)
     {
         if (size < 0) return name;
-        long fs = filteredSize >= 0 ? filteredSize : size;
-        return $"{name}  [{FormatSize(fs)}/{FormatSize(size)}]";
+        return name;
     }
 
     public static string FormatSize(long bytes) => bytes switch
@@ -1236,13 +1476,13 @@ public partial class MainForm : Form
         // pass so splitContainer.Width reflects its true painted size rather
         // than the designer placeholder (150 px). Setting Panel2MinSize while
         // Width is still 150 produces an empty valid range and WinForms throws.
-        int savedDist = saved?.SplitterDistance ?? 300;
+        int savedDist = saved?.SplitterDistance ?? 320;
         BeginInvoke(() =>
         {
-            splitContainer.Panel1MinSize = 150;
+            splitContainer.Panel1MinSize = 170;
             splitContainer.Panel2MinSize = 300;
-            int max = Math.Max(150, splitContainer.Width - 300 - splitContainer.SplitterWidth);
-            splitContainer.SplitterDistance = Math.Clamp(savedDist, 150, max);
+            int max = Math.Max(170, splitContainer.Width - 300 - splitContainer.SplitterWidth);
+            splitContainer.SplitterDistance = Math.Clamp(savedDist, 170, max);
         });
 
         int formChrome = Width - ClientSize.Width;
@@ -1257,11 +1497,10 @@ public partial class MainForm : Form
 
         SetWindowTheme(progressBar.ProgressBar.Handle, "", "");
 
-        // ListView doesn't expose DoubleBuffered publicly; set it via reflection.
-        typeof(ListView)
-            .GetProperty("DoubleBuffered",
-                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-            ?.SetValue(listView, true);
+        // ListView and TreeView don't expose DoubleBuffered publicly; set via reflection.
+        var flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+        typeof(ListView).GetProperty("DoubleBuffered", flags)?.SetValue(listView,  true);
+        typeof(TreeView).GetProperty("DoubleBuffered", flags)?.SetValue(treeView, true);
 
         // Style nav bar to match system
         navBar.BackColor   = SystemColors.Control;
@@ -1270,11 +1509,18 @@ public partial class MainForm : Form
         btnUp.BackColor    = SystemColors.Control;
         UpdateNavButtons();
 
+        // Restore last-used filter (applied below after navigation).
+        if (!string.IsNullOrEmpty(saved?.DefaultFilter))
+            filterTextBox.Text = saved.DefaultFilter;
+
         // Navigate to last path or show drives
         if (saved?.LastPath != null && Directory.Exists(saved.LastPath))
             NavigateTo(saved.LastPath);
         else
             ShowDrivesInListView();
+
+        // Apply default filter once on startup.
+        ApplyFilterNow();
 
         scanStatusLabel.Text = "Processing";
     }
@@ -1304,7 +1550,7 @@ public partial class MainForm : Form
         _cts.Cancel();
         _filterCts.Cancel();
         _watcher?.Dispose();
-        _filterDebounce?.Dispose();
+
         _watcherDebounce?.Dispose();
         SaveSettings();
         base.OnFormClosing(e);
@@ -1365,7 +1611,8 @@ internal record AppSettings(
     int     SortCol,
     string  SortDir,
     string? LastPath,
-    int     SplitterDistance);
+    int     SplitterDistance,
+    string? DefaultFilter);
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Per-drive scan progress tracker
