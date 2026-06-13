@@ -58,3 +58,67 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChang
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{localappdata}\FileExplorer"
+
+[Code]
+// Returns the uninstall string for the currently installed version, or empty string if not installed.
+function GetUninstallString: String;
+var
+  sKey: String;
+  sVal: String;
+begin
+  sKey := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppID}_is1';
+  sVal := '';
+  if not RegQueryStringValue(HKLM, sKey, 'UninstallString', sVal) then
+    RegQueryStringValue(HKCU, sKey, 'UninstallString', sVal);
+  Result := sVal;
+end;
+
+function IsAlreadyInstalled: Boolean;
+begin
+  Result := (GetUninstallString() <> '');
+end;
+
+// Called before the wizard pages are shown. If an existing installation is found,
+// offer Repair, Uninstall, or Cancel.
+function InitializeSetup: Boolean;
+var
+  sUninstall: String;
+  iResult: Integer;
+  iCode: Integer;
+begin
+  Result := True;
+
+  if not IsAlreadyInstalled() then
+    Exit;
+
+  iResult := MsgBox(
+    '{#MyAppName} is already installed.' + #13#10 + #13#10 +
+    'Choose an option:' + #13#10 +
+    '  Yes    — Repair / reinstall (overwrites existing files)' + #13#10 +
+    '  No     — Uninstall the existing installation and exit' + #13#10 +
+    '  Cancel — Do nothing and exit',
+    mbConfirmation, MB_YESNOCANCEL);
+
+  if iResult = IDYES then
+  begin
+    // Repair: continue with normal installation (files will be overwritten).
+    Result := True;
+  end
+  else if iResult = IDNO then
+  begin
+    // Uninstall: run the existing uninstaller silently then exit setup.
+    sUninstall := RemoveQuotes(GetUninstallString());
+    if Exec(sUninstall, '/SILENT /NORESTART /SUPPRESSMSGBOXES', '', SW_HIDE,
+            ewWaitUntilTerminated, iCode) then
+      MsgBox('{#MyAppName} has been uninstalled.', mbInformation, MB_OK)
+    else
+      MsgBox('Uninstall could not be completed (code ' + IntToStr(iCode) + ').',
+             mbError, MB_OK);
+    Result := False; // exit setup after uninstall
+  end
+  else
+  begin
+    // Cancel: exit setup without making any changes.
+    Result := False;
+  end;
+end;
